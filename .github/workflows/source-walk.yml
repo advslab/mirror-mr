@@ -1,0 +1,100 @@
+name: source walk
+
+# Keeps one rolling release (tag `data`) of the vendor's security feeds in
+# the consumer's snapshot record shape: csaf-YYYY.ndjson.gz and
+# vex-YYYY.ndjson.gz per directory year (one line per document) and
+# cvrf-<ID>.ndjson.gz per release, indexed by state.json. Each run reads
+# both directories' changes.csv (and index.txt until a directory is
+# complete) and fetches only the documents whose change time moved, and
+# the release list, fetching only the releases whose CurrentReleaseDate
+# moved. A run cools down when the source fails the same way 8 calls in a
+# row, stops at its time budget (a year unit stopped mid-way is published
+# partial and finished by the next run), and publishes what it has.
+#
+# Chaining: when a run ends with work left (its budget, or an error other
+# than a stall) and `chain` is above 0, it dispatches one follow-up run with
+# chain - 1. The concurrency group keeps runs one at a time.
+#
+# Every 4 hours.
+#
+# Set the repository secrets SOURCE_BASE (the advisories directory's root),
+# VEX_BASE (the VEX directory's root) and CVRF_BASE (the release API's root),
+# each with its trailing slash (Settings → Secrets and variables → Actions →
+# Secrets); they are masked in every log.
+on:
+  schedule:
+    - cron: "25 */4 * * *"
+  workflow_dispatch:
+    inputs:
+      chain:
+        description: "how many follow-up runs may still follow this one"
+        required: false
+        default: "3"
+      budget:
+        description: "minutes the walk may run"
+        required: false
+        default: "330"
+      pace:
+        description: "seconds between requests"
+        required: false
+        default: "0.15"
+      cooldown:
+        description: "minutes to wait after 8 calls in a row failed the same way (default 30)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: walk
+  cancel-in-progress: false
+
+jobs:
+  walk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+      - name: refuse without the source secrets
+        env:
+          BASE: ${{ secrets.SOURCE_BASE }}
+          VEX_BASE: ${{ secrets.VEX_BASE }}
+          CVRF_BASE: ${{ secrets.CVRF_BASE }}
+        run: |
+          if [ -z "$BASE" ] || [ -z "$VEX_BASE" ] || [ -z "$CVRF_BASE" ]; then echo "::error::repository secrets SOURCE_BASE, VEX_BASE and CVRF_BASE must all be set"; exit 1; fi
+      - name: walk
+        id: walk
+        env:
+          BASE: ${{ secrets.SOURCE_BASE }}
+          VEX_BASE: ${{ secrets.VEX_BASE }}
+          CVRF_BASE: ${{ secrets.CVRF_BASE }}
+          BUDGET: ${{ inputs.budget || '330' }}
+          PACE: ${{ inputs.pace || '0.15' }}
+          COOLDOWN: ${{ inputs.cooldown }}
+          CHAIN: ${{ inputs.chain || '3' }}
+          RELEASE_TAG: data
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          chmod +x bin/source-walk
+          sha256sum bin/source-walk
+          bin/source-walk
+          more=$(sed -n 's/^more=//p' "$GITHUB_OUTPUT" | tail -n 1)
+          if [ "$more" != true ] || [ "$CHAIN" -le 0 ]; then
+            echo "chain: no follow-up run requested (more=${more:-unset}, chain=$CHAIN)"
+          fi
+      - name: chain
+        if: ${{ success() && steps.walk.outputs.more == 'true' && fromJSON(inputs.chain || '3') > 0 }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHAIN: ${{ inputs.chain || '3' }}
+          BUDGET: ${{ inputs.budget || '330' }}
+          PACE: ${{ inputs.pace || '0.15' }}
+          COOLDOWN: ${{ inputs.cooldown }}
+        run: |
+          left=$((CHAIN - 1))
+          gh workflow run source-walk.yml --repo "$GITHUB_REPOSITORY" --ref "$GITHUB_REF_NAME" \
+            -f chain="$left" -f budget="$BUDGET" -f pace="$PACE" -f cooldown="$COOLDOWN"
+          echo "chain: follow-up run requested; $left more may follow it"

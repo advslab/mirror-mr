@@ -1,0 +1,47 @@
+name: source probe
+
+# Manual only. Checks from a runner whether the vendor's three feeds answer
+# and how fast: each directory's index.txt and changes.csv and one document
+# of each, the release list and one release, then 6 more paced documents;
+# reports latency, every non-200 answer and every 200 that is not what was
+# asked for. Stores nothing.
+# Set the repository secrets SOURCE_BASE (the advisories directory's root),
+# VEX_BASE (the VEX directory's root) and CVRF_BASE (the release API's root),
+# each with its trailing slash (Settings → Secrets and variables → Actions →
+# Secrets); they are masked in every log.
+on:
+  workflow_dispatch:
+    inputs:
+      pace:
+        description: "seconds between requests"
+        required: false
+        default: "1"
+      more:
+        description: "paced documents after the first calls (default 6)"
+        required: false
+        default: ""
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: refuse without the source secrets
+        env:
+          BASE: ${{ secrets.SOURCE_BASE }}
+          VEX_BASE: ${{ secrets.VEX_BASE }}
+          CVRF_BASE: ${{ secrets.CVRF_BASE }}
+        run: |
+          if [ -z "$BASE" ] || [ -z "$VEX_BASE" ] || [ -z "$CVRF_BASE" ]; then echo "::error::repository secrets SOURCE_BASE, VEX_BASE and CVRF_BASE must all be set"; exit 1; fi
+      - name: probe
+        env:
+          BASE: ${{ secrets.SOURCE_BASE }}
+          VEX_BASE: ${{ secrets.VEX_BASE }}
+          CVRF_BASE: ${{ secrets.CVRF_BASE }}
+          PACE: ${{ inputs.pace }}
+          MORE: ${{ inputs.more }}
+        run: |
+          chmod +x bin/source-probe
+          sha256sum bin/source-probe
+          bin/source-probe
